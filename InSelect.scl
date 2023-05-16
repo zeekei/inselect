@@ -1,0 +1,1448 @@
+﻿FUNCTION_BLOCK "InSelect"
+TITLE = 'Custom InSelect Block'
+{ S7_Optimized_Access := 'TRUE' }
+AUTHOR : TI
+FAMILY : NF1
+NAME : InSelect
+VERSION : 1.7
+//*************************************************************************************************************
+// ----- Revision Control -----
+//Revision    Date                Author(s)           Description
+//0.1         July 14, 2005       T.Tison             Released to JOCY for graphics and alarm messaging adds.
+//0.2         July 27, 2005       ISD                 Added alarming and startup interfaces.
+//0.3         August 12, 2005     ISD                 Added deadband for switching. Added code to prevent none
+//                                                    select. Changed mismatch SP from absolute to percent.
+//0.4         August 24, 2005     ISD                 Adjusted Alarming, Deadband, and Manual Mode.  Added Block
+//                                                    Name String for OS.
+//0.5         September 13, 2005  ISD                 Changed DB_SW_EN to deal with a jump in inputs where the
+//                                                    inputs jump but stay close enough to be within DB_PCNT.
+//0.6         October 04, 2005    ISD                 Removed auto-enable functionality. Limit operator control
+//                                                    when only one input is enabled.
+//0.7         October 07, 2005    ISD                 Made variables available for OS (QERR_MM and QWARN_EN).
+//0.8         October 26, 2005    ISD                 Mismatch changed to alarm only, no hold.
+//0.9         December 13, 2005   ISD                 Add MODE2 for condition where triple select has one QBAD.
+//1.0         December 28, 2005   ISD                 Removed old comments and DB switching function.
+//1.1         January 23, 2006    ISD                 Added AutoRecovery from BTA with time delay, selectable by
+//                                                    user in ES.  Added DB switching function back into code and
+//                                                    fixed.  Changed functionality to go to MODE2 based on
+//                                                    operator de-selection as well as QBAD.
+//1.2         January 27, 2006    ISD                 Fixed the following issues:
+//                                                    - No re-evaluation of block if two inputs are identical and
+//                                                    one of them is selected and then the third input goes out-
+//                                                    side of deadband.  See Deadband Switching Part 2.
+//                                                    - No re-evaluation of block if inputs were within deadband
+//                                                    and selected input was disabled (by operator or QBAD).
+//                                                    Fixed using Non-Standard Select One Shot.
+//                                                    - Going from NUM_IN=2 to NUM_IN=3 shows a BTA on IN03 which
+//                                                    cannot be cleared until actual input is sent to BTA and
+//                                                    then set good again. Found out that the issue is in the
+//                                                    OS. When the indicators are grouped and given a visiblity
+//                                                    attribute, it produces this error. Changed the visibility
+//                                                    of each of the indicators (DIS, EN, BTA) and left them
+//                                                    ungrouped with a panel to cover over them if NUM_IN is 2 or
+//                                                    less. This affects the ICON and the Faceplate.
+//                                                    
+//1.3         April 25, 2006    TI                    Added animation output for new icon for this block.
+//1.4         July 15,  2006    PRIME GS              Added Inputs for Text Display on Faceplate per analog Input
+//1.5         July 25,  2006    PRIME GS              All Timer Values insec. as REAL
+//1.6         July 21,  2020    I&CS                  Added Internal & External Parameter Transfer for SCADA global data block.
+//1.7         Nov. 17,  2020    I&CS                  Removed 'ALARM_8P' block & PCS7 attributes.
+//----- General Description -----
+//This block is designed to select one of up to three input values.  This block may be used as a dual or triple
+//select, or a single value may be passed through also to take advantage of the alarming or other features of the
+//block.  This block also checks for a mismatch between the inputs (input values too far apart).  The output will
+//hold last value on failure of all transmitters.  Auto recovery will bring back a failed input after a time
+//delay if enabled.
+//*************************************************************************************************************
+   VAR_INPUT 
+      SAMPLE_T { CFC_Visible := 'false'; CFC_Interconnectable := 'false'} : Real := 0.1;   // Default Sample Time (in seconds)Has Assignable UnitsParameter to be translated to OSParameter to update auto in monitor
+      IN01 { CFC_EngineeringUnit := '%'; CFC_ForTest := 'true'} : Real;   // Input 01  (Xmitter or Value)
+      IN01_QBAD { CFC_ForTest := 'true'} : Bool;   // QBad from AI Block
+      IN01_QC : Byte := BYTE#16#00;   // Quality Code for Input 01
+      IN01_TX { CFC_Visible := 'true'; CFC_Interconnectable := 'false'} : String := 'A';   // Text Input max 4 StringHas Assignable UnitsParameter to be translated to OSParameter to update auto in monitor
+      IN02 { CFC_EngineeringUnit := '%'; CFC_ForTest := 'true'} : Real;   // Input 02  (Xmitter or Value)
+      IN02_QBAD { CFC_ForTest := 'true'} : Bool;   // QBad from AI Block
+      IN02_QC : Byte := BYTE#16#00;   // Quality Code for Input 02
+      IN02_TX { CFC_Visible := 'true'; CFC_Interconnectable := 'false'} : String := 'B';   // Text Input max 4 StringHas Assignable UnitsParameter to be translated to OSParameter to update auto in monitor
+      IN03 { CFC_EngineeringUnit := '%'; CFC_ForTest := 'true'} : Real;   // Input 03  (Xmitter or Value)
+      IN03_QBAD { CFC_ForTest := 'true'} : Bool;   // QBad from AI Block
+      IN03_QC : Byte := BYTE#16#00;   // Quality Code for Input 03
+      IN03_TX { CFC_Visible := 'true'; CFC_Interconnectable := 'false'} : String := 'C';   // Text Input max 4 String
+   END_VAR
+
+   VAR_OUTPUT 
+      QSEL { CFC_ForTest := 'true'} : Real;   // Selected Output
+      QSEL_QBAD { CFC_ForTest := 'true'} : Bool;   // Selected Output QBAD (BTA)
+      QSEL_QC { CFC_ForTest := 'true'} : Byte;   // Selected Output Quality Code
+      QHOLD { CFC_ForTest := 'true'} : Bool;   // Hold is active. (All QBAD or MISMATCH)
+      QBAD01 { CFC_ForTest := 'true'} : Bool;   // Input 01 in QBAD Condition
+      QBAD02 { CFC_ForTest := 'true'} : Bool;   // Input 02 in QBAD Condition
+      QBAD03 { CFC_ForTest := 'true'} : Bool;   // Input 03 in QBAD Condition
+      QERR_ALL { CFC_ForTest := 'true'} : Bool;   // Error on all configured inputs
+      QERR_MM { CFC_ForTest := 'true'} : Bool;   // Mismatch Error between two inputs
+      QWARN_EN { CFC_ForTest := 'true'} : Bool;   // Input Enable Warning (not all configd inputs enabled)
+      QWARN_CFG { CFC_ForTest := 'true'} : Bool;   // Configuration Warning (possible configuration error)
+      Q_LO { CFC_ForTest := 'true'} : Real;   // Low Value for display or connection elsewhere
+      Q_HI { CFC_ForTest := 'true'} : Real;   // High Value for display or connection elsewhere
+      Q_MID { CFC_ForTest := 'true'} : Real;   // Middle Value for display or connection elsewhere
+      Q_AVG { CFC_ForTest := 'true'} : Real;   // Average Value for display or connection elsewhere
+      QSEL01 { CFC_ForTest := 'true'} : Bool;   // IN01 Selected as OUT
+      QSEL02 { CFC_ForTest := 'true'} : Bool;   // IN02 Selected as OUT
+      QSEL03 { CFC_ForTest := 'true'} : Bool;   // IN03 Selected as OUT
+      QMODE_TXT { CFC_ForTest := 'true'} : String[3];   // Configured Mode in Text Format for OS
+      Q_ANI { CFC_ForTest := 'true'} : Int;   // Animation Display
+   END_VAR
+
+   VAR_IN_OUT 
+      NUM_IN { CFC_ForTest := 'true'} : Int := 2;   // Num of Inputs (1=Single,2=Dual,3=Triple)
+      MODE { CFC_ForTest := 'true'} : Int := 0;   // Select Mode (0=Lo,1=Hi,2=Mid,3=Avg)
+      MODE2 { CFC_ForTest := 'true'} : Int := 0;   // New Mode on QBAD if NUM_IN=3 (0=Lo,1=Hi,2=Mid,3=Avg)
+      AR_EN { CFC_ForTest := 'true'} : Bool := 1;   // AutoRecover from BTA (0=No AutoRecover,1=AutoRecover)
+      AR_DLY : Int := 5;   // Seconds to wait before AutoRecover
+      IN01_REQ { CFC_ForTest := 'true'} : Bool := 1;   // Input 01 Enable Request
+      IN02_REQ { CFC_ForTest := 'true'} : Bool := 0;   // Input 02 Enable Request
+      IN03_REQ { CFC_ForTest := 'true'} : Bool := 0;   // Input 03 Enable Request
+      HRANGE { CFC_ForTest := 'true'} : Real := 100.0;   // High Range for calculating DB_SP and MM_SP
+      LRANGE { CFC_ForTest := 'true'} : Real := 0.0;   // Low Range for calculating DB_SP and MM_SP
+      DB_PCNT { CFC_ForTest := 'true'} : Real := 0.5;   // Deadband Percent (percent of full range for deadband)
+      MM_EN : Bool := 1;   // Mismatch Alarm Enable (0=Mismatch Off,1=Mismatch On)
+      MM_PCNT { CFC_ForTest := 'true'} : Real := 4.0;   // Mismatch Percent (percent of full range for mismatch)
+      MM_DLY : Int := 10;   // Seconds to wait for Mismatch Alarm
+      MM_TMR_CURR : Real := 1.0;   // Mismatch Timer Current Value (sec)
+      MM_TMR_PSET : Real := 1.0;   // Mismatch Timer Preset Value (sec)
+      AR01_TMRC : Real := 1.0;   // AutoRecover 01 Timer Current Value (sec)
+      AR02_TMRC : Real := 1.0;   // AutoRecover 02 Timer Current Value (sec)
+      AR03_TMRC : Real := 1.0;   // AutoRecover 03 Timer Current Value (sec)
+      AR_TMR_PSET : Real := 1.0;   // AutoRecover Timer Preset Value (sec)
+      IN01_EN { CFC_ForTest := 'true'; CFC_Visible := 'false'} : Bool := 1;   // Input 01 Enable
+      IN02_EN { CFC_ForTest := 'true'; CFC_Visible := 'false'} : Bool := 0;   // Input 02 Enable
+      IN03_EN { CFC_ForTest := 'true'; CFC_Visible := 'false'} : Bool := 0;   // Input 03 Enable
+      SCADA_DB : "INSELECTOR";   // SCADA Data block for InSelect
+   END_VAR
+
+   VAR 
+      MM_SP : Real;   // Mismatch Setpoint (eng units between inputs to alarm)
+      MM_TMR_RUN : Bool;   // Timer Run Command for Mismatch
+      MM_TMR_DONE : Bool;   // Timer Done Status for Mismatch
+      EXECTIME : Real;   // Execution Time (msec). Calculated from SAMPLE_T
+      LAST_GOOD : Real;   // Last Good Output Value
+      NUM_EN : Int;   // Number of Inputs Enabled
+      IN01_EN_I : Int;   // Input 01 Enabled Integer format
+      IN02_EN_I : Int;   // Input 02 Enabled Integer format
+      IN03_EN_I : Int;   // Input 03 Enabled Integer format
+      MODE2ACTIVE : Bool;   // Mode 2 is active (QBAD with NUM_IN=3)
+      MODE_TEMP : Int;   // Mode Temp used when MODE2 is active.
+      DB_EN : Bool := 1;   // Deadband Enable (0=Deadband Off,1=Deadband On)
+      AR01_STRT : Bool;   // Timer Start Command for Auto Recovery 01
+      AR02_STRT : Bool;   // Timer Start Command for Auto Recovery 02
+      AR03_STRT : Bool;   // Timer Start Command for Auto Recovery 03
+      AR01_TMRDN : Bool;   // Timer Done Status for Auto Recovery 01
+      AR02_TMRDN : Bool;   // Timer Done Status for Auto Recovery 02
+      AR03_TMRDN : Bool;   // Timer Done Status for Auto Recovery 03
+      FLG01_QBAD : Bool;   // Flag on QBAD Condition for Input 01
+      FLG02_QBAD : Bool;   // Flag on QBAD Condition for Input 02
+      FLG03_QBAD : Bool;   // Flag on QBAD Condition for Input 03
+      AR01_EN : Bool;   // AutoRecovery Enable of Input 01
+      AR02_EN : Bool;   // AutoRecovery Enable of Input 02
+      AR03_EN : Bool;   // AutoRecovery Enable of Input 03
+      DB_SP : Real;   // Deadband Setpoint for Switching
+      DB_SW_EN12 : Bool;   // Deadband Switching difference IN01 and IN02
+      DB_SW_EN23 : Bool;   // Deadband Switching difference IN02 and IN03
+      DB_SW_EN13 : Bool;   // Deadband Switching difference IN01 and IN03
+      DB_SW_3L12 : Bool;   // Triple select LO; switch due to IN01 and IN02
+      DB_SW_3L23 : Bool;   // Triple select LO; switch due to IN02 and IN03
+      DB_SW_3L13 : Bool;   // Triple select LO; switch due to IN01 and IN03
+      DB_SW_3LO : Bool;   // Deadband Switching difference for triple select LO
+      DB_SW_3H12 : Bool;   // Triple select HI; switch due to IN01 and IN02
+      DB_SW_3H23 : Bool;   // Triple select HI; switch due to IN02 and IN03
+      DB_SW_3H13 : Bool;   // Triple select HI; switch due to IN01 and IN03
+      DB_SW_3HI : Bool;   // Deadband Switching difference for triple select HI
+      DB_SW_3M12 : Bool;   // Triple select MID; switch due to IN01 and IN02
+      DB_SW_3M23 : Bool;   // Triple select MID; switch due to IN02 and IN03
+      DB_SW_3M13 : Bool;   // Triple select MID; switch due to IN01 and IN03
+      DB_SW_3MID : Bool;   // Deadband Switching difference for triple select MID
+      IN01High : Bool;   // IN01 is highest
+      IN02High : Bool;   // IN02 is highest
+      IN03High : Bool;   // IN03 is highest
+      IN01Higher : Bool;   // IN01 is higher than one of the others by DB_SP
+      IN02Higher : Bool;   // IN02 is higher than one of the others by DB_SP
+      IN03Higher : Bool;   // IN03 is higher than one of the others by DB_SP
+      IN01Low : Bool;   // IN01 is lowest
+      IN02Low : Bool;   // IN02 is lowest
+      IN03Low : Bool;   // IN03 is lowest
+      IN01Lower : Bool;   // IN01 is lower than one of the others by DB_SP
+      IN02Lower : Bool;   // IN02 is lower than one of the others by DB_SP
+      IN03Lower : Bool;   // IN03 is lower than one of the others by DB_SP
+      QWARN_EN_LS : Bool;   // Condition of QWARN_EN during last (previous) scan
+      QWARN_EN_OS : Bool;   // QWARN_EN One Shot to set re-evaluation if within DB
+      L_IN01_REQ : Bool;   // Last IN01 value from SCADA
+      L_IN02_REQ : Bool;   // Last IN02 value from SCADA
+      L_IN03_REQ : Bool;   // Last IN03 value from SCADA
+      L_MODE : Int;   // Last MODE value from SCADA
+   END_VAR
+
+   VAR_TEMP 
+      IN01Temp : Real;   // Temporary Value of IN01 used within the block
+      IN02Temp : Real;   // Temporary Value of IN02 used within the block
+      IN03Temp : Real;   // Temporary Value of IN03 used within the block
+      BCD_EN_B0 : Int;   // Bit 0 of BCD EN Code
+      BCD_EN_B1 : Int;   // Bit 1 of BCD EN Code
+      BCD_EN_B2 : Int;   // Bit 2 of BCD EN Code
+      BCD_EN : Int;   // BCD Code of EN Bits
+      MM_Err1 : Bool;   // Mismatch Error (Between IN01 and IN02)
+      MM_Err2 : Bool;   // Mismatch Error (Between IN02 and IN03)
+      MM_Err3 : Bool;   // Mismatch Error (Between IN03 and IN01)
+      Dummy : Int;   // Return Value for the RD_SINFO SFC6 call
+   END_VAR
+
+
+BEGIN
+	// Calculate the setpoint for mismatch alarming and deadband switching based on the HRANGE and LRANGE inputs.
+	#MM_SP := (#MM_PCNT * (#HRANGE - #LRANGE)) / 100.0;
+	#DB_SP := (#DB_PCNT * (#HRANGE - #LRANGE)) / 100.0;
+	
+	(**************************************************************************************************************
+	AUTOMATIC DISABLE ON QBAD:
+	Clear the INnn_EN bit automatically if there is a QBAD on the input.  The INnn_EN input remains false UNTIL an
+	operator sets the INnn_REQ at the OS.  However, if AutoRecovery is enabled, AR_EN=true, then the block will set
+	the INnn_REQ automatically after the time delay, AR_DLY (in seconds).  This code will prohibit the operator
+	from enabling the input while a QBAD condition exists.
+	Note:  For Inputs 2 and 3, need to prohibit operation (using the EN bit) if the block is not configured for the
+	appropriate number of inputs.  This is required since a value of 0 may be valid for inputs at various times.
+	**************************************************************************************************************)
+	
+	IF #IN01_QBAD THEN
+	    #IN01_EN := false;
+	    #IN01_REQ := false;
+	    #FLG01_QBAD := true;
+	END_IF;
+	IF #IN02_QBAD OR (#NUM_IN < 2) THEN
+	    #IN02_EN := false;
+	    #IN02_REQ := false;
+	    #FLG02_QBAD := true;
+	END_IF;
+	IF #IN03_QBAD OR (#NUM_IN < 3) THEN
+	    #IN03_EN := false;
+	    #IN03_REQ := false;
+	    #FLG03_QBAD := true;
+	END_IF;
+	
+	(**************************************************************************************************************
+	AUTOMATIC RECOVERY ON RETURN FROM QBAD (Parts 1 & 2):
+	Part 1: Clear QBAD Flags when everything is OK.  Do not do this under an AR_EN If statement so that if the
+	        AR_EN is set true during a BTA condition, then it will work correctly to bring back the Input.
+	Part 2: Automatically Enable the INnn_REQ if the input has been disabled, QBAD is OK, and Timer is done.
+	**************************************************************************************************************)
+	
+	// Part 1: Clear QBAD Flags
+	IF #IN01_EN AND NOT (#IN01_QBAD) THEN
+	    #FLG01_QBAD := FALSE;
+	END_IF;
+	IF #IN02_EN AND NOT (#IN02_QBAD) THEN
+	    #FLG02_QBAD := FALSE;
+	END_IF;
+	IF #IN03_EN AND NOT (#IN03_QBAD) THEN
+	    #FLG03_QBAD := FALSE;
+	END_IF;
+	
+	// Part 2: Automatic Enable of Inputs on return from QBAD after timer.
+	IF #AR_EN THEN
+	    IF NOT (#IN01_EN) AND NOT (#IN01_QBAD) AND #AR01_EN THEN
+	        #IN01_REQ := TRUE;
+	    END_IF;
+	    IF NOT (#IN02_EN) AND NOT (#IN02_QBAD) AND #AR02_EN THEN
+	        #IN02_REQ := TRUE;
+	    END_IF;
+	    IF NOT (#IN03_EN) AND NOT (#IN03_QBAD) AND #AR03_EN THEN
+	        #IN03_REQ := TRUE;
+	    END_IF;
+	END_IF;
+	
+	(**************************************************************************************************************
+	NON-STANDARD SELECT ONE SHOT (Part 1):
+	Part 1: Set up the one shot to use directly below and in the main section of program.
+	**************************************************************************************************************)
+	
+	#QWARN_EN_OS := false;
+	IF #QWARN_EN AND NOT (#QWARN_EN_LS) THEN
+	    #QWARN_EN_OS := true;
+	END_IF;
+	#QWARN_EN_LS := #QWARN_EN;
+	
+	(**************************************************************************************************************
+	DEADBAND SWITCHING (Parts 1 to 5):
+	Part 1: Check between each pair of inputs to see if they are farther apart than the DB_SP.  Dual selection
+	        setup (or triple selection with one QBAD), uses one of these three variables to determine if the output
+	        needs to switch to a different input.
+	Part 2: Only used in triple select setup with no QBADs.  Set up High and Low Booleans for use in subsequent
+	        equations.  INnnLow means this one is the lowest of three.  INnnHigh means this one is the highest of
+	        three.  INnnLower means this one is lower than one of the other two by the DB_SP.  INnnHigher means
+	        this one is higher than one of the other two by the DB_SP.
+	Part 3: Only used in triple select setup with no QBADs.  Check for a LO switch condition.  If one of the inputs
+	        is highest and the other two are far enough apart, select a new input.  Or, if the one selected goes
+	        far enough away from the other two that is is beyond one of the others by more than the DB_SP,
+	        calculate the switch.
+	Part 4: Only used in triple select setup with no QBADs.  Check for a HI switch condition.  If one of the inputs
+	        is lowest and the other two are far enough apart, select a new input.  Or, if the one selected goes
+	        far enough away from the other two that is is beyond one of the others by more than the DB_SP,
+	        calculate the switch.
+	Part 5: Only used in triple select setup with no QBADs.  Check for a MID switch condition. If one of the inputs
+	        is lowest or highest and the other two are far enough apart, select a new input.  Or, if the one
+	        selected goes far enough away from the other two that is is beyond one of the others by more than the
+	        DB_SP, calculate the switch.
+	**************************************************************************************************************)
+	
+	// Part 1: Differences between each pair outside of DB_SP.
+	#DB_SW_EN12 := (ABS(#IN01 - #IN02) > #DB_SP) OR #QWARN_EN_OS;
+	#DB_SW_EN23 := (ABS(#IN02 - #IN03) > #DB_SP) OR #QWARN_EN_OS;
+	#DB_SW_EN13 := (ABS(#IN01 - #IN03) > #DB_SP) OR #QWARN_EN_OS;
+	
+	// Part 2: Calculate Low, High, Lower and Higher.
+	#IN01Low := (((#IN01 <= #IN02) AND (#IN01 < #IN03)) OR ((#IN01 <= #IN03) AND (#IN01 < #IN02)));
+	#IN02Low := (((#IN02 <= #IN01) AND (#IN02 < #IN03)) OR ((#IN02 <= #IN03) AND (#IN02 < #IN01)));
+	#IN03Low := (((#IN03 <= #IN01) AND (#IN03 < #IN02)) OR ((#IN03 <= #IN02) AND (#IN03 < #IN01)));
+	#IN01Lower := (((#IN02 - #IN01) > #DB_SP) OR ((#IN03 - #IN01) > #DB_SP));
+	#IN02Lower := (((#IN01 - #IN02) > #DB_SP) OR ((#IN03 - #IN02) > #DB_SP));
+	#IN03Lower := (((#IN01 - #IN03) > #DB_SP) OR ((#IN02 - #IN03) > #DB_SP));
+	
+	#IN01High := (((#IN01 >= #IN02) AND (#IN01 > #IN03)) OR ((#IN01 >= #IN03) AND (#IN01 > #IN02)));
+	#IN02High := (((#IN02 >= #IN01) AND (#IN02 > #IN03)) OR ((#IN02 >= #IN03) AND (#IN02 > #IN01)));
+	#IN03High := (((#IN03 >= #IN01) AND (#IN03 > #IN02)) OR ((#IN03 >= #IN02) AND (#IN03 > #IN01)));
+	#IN01Higher := (((#IN01 - #IN02) > #DB_SP) OR ((#IN01 - #IN03) > #DB_SP));
+	#IN02Higher := (((#IN02 - #IN01) > #DB_SP) OR ((#IN02 - #IN03) > #DB_SP));
+	#IN03Higher := (((#IN03 - #IN01) > #DB_SP) OR ((#IN03 - #IN02) > #DB_SP));
+	
+	// Part 3: Check for a new calculation required for triple select LO.
+	#DB_SW_3L12 := (#IN03High AND #DB_SW_EN12) OR (#IN03High AND #IN03Higher AND #QSEL03);
+	#DB_SW_3L23 := (#IN01High AND #DB_SW_EN23) OR (#IN01High AND #IN01Higher AND #QSEL01);
+	#DB_SW_3L13 := (#IN02High AND #DB_SW_EN13) OR (#IN02High AND #IN02Higher AND #QSEL02);
+	#DB_SW_3LO := #DB_SW_3L12 OR #DB_SW_3L23 OR #DB_SW_3L13;
+	
+	// Part 4: Check for a new calculation required for triple select HI.
+	#DB_SW_3H12 := (#IN03Low AND #DB_SW_EN12) OR (#IN03Low AND #IN03Lower AND #QSEL03);
+	#DB_SW_3H23 := (#IN01Low AND #DB_SW_EN23) OR (#IN01Low AND #IN01Lower AND #QSEL01);
+	#DB_SW_3H13 := (#IN02Low AND #DB_SW_EN13) OR (#IN02Low AND #IN02Lower AND #QSEL02);
+	#DB_SW_3HI := #DB_SW_3H12 OR #DB_SW_3H23 OR #DB_SW_3H13;
+	
+	// Part 5: Check for a new calculation required for triple select MID.
+	#DB_SW_3M12 := ((#IN03High OR #IN03Low) AND #DB_SW_EN12) OR (#IN03Low AND #IN03Lower AND #QSEL03) OR (#IN03High AND #IN03Higher AND #QSEL03);
+	#DB_SW_3M23 := ((#IN01High OR #IN01Low) AND #DB_SW_EN23) OR (#IN01Low AND #IN01Lower AND #QSEL01) OR (#IN01High AND #IN01Higher AND #QSEL01);
+	#DB_SW_3M13 := ((#IN02High OR #IN02Low) AND #DB_SW_EN13) OR (#IN02Low AND #IN02Lower AND #QSEL02) OR (#IN02High AND #IN02Higher AND #QSEL02);
+	#DB_SW_3MID := #DB_SW_3M12 OR #DB_SW_3M23 OR #DB_SW_3M13;
+	
+	(**************************************************************************************************************
+	MODE 2 ACTIVATION (Part 1 and 2):
+	MODE 2 is used when the block is configured as a triple select and one of the inputs goes into a QBAD
+	condition.  When this condition exists, the MODE2 setting will determine if the block now acts as a LO, HI, or
+	AVG block.
+	Part 1: Determine if MODE2 needs to be activated.
+	Part 2: Send outputs to QBADnn on a QBAD condition.  Only report errors on these QBADs (not when INnn_EN=false)
+	        so that an alarm will not be generated if the operator intentionally cleared the INnn_EN.
+	**************************************************************************************************************)
+	
+	// Part 1: Determine if MODE2 needs to be activated.
+	#MODE2ACTIVE := (#NUM_IN = 3) AND (#IN01_QBAD OR #IN02_QBAD OR #IN03_QBAD OR #QWARN_EN);
+	
+	// Part 2: Set the QBAD outputs based on QBAD inputs.
+	#QBAD01 := #IN01_QBAD;
+	#QBAD02 := #IN02_QBAD;
+	#QBAD03 := #IN03_QBAD;
+	
+	(**************************************************************************************************************
+	CONFIGURATION WARNING:
+	A configuration warning is generated if there is a potential configuration error.  If the NUM_IN=1 (single
+	select block) and there are non-zero values for IN02 or IN03, there is a possible configuration error.  If the
+	NUM_IN=2 (dual select block) and there is a non-zero value in IN03, there is a possible configuration error.
+	**************************************************************************************************************)
+	
+	// Set the QWARN_CFG output if there is a potential configuration error.
+	#QWARN_CFG := ((#NUM_IN = 1) AND ((#IN02 <> 0.0) OR (#IN03 <> 0.0))) OR
+	((#NUM_IN = 2) AND (#IN03 <> 0.0));
+	
+	// Set Temporary Values for INnn based on Manual Input Selection for use throughout this code.
+	// Note: Manual Mode eliminated from the code, but still use Temp values.
+	#IN01Temp := #IN01;
+	#IN02Temp := #IN02;
+	#IN03Temp := #IN03;
+	
+	(**************************************************************************************************************
+	BCD CODE of INPUTS:
+	This is one of the building blocks of this code.  Using the BCD code of enabled inputs allows the block to only
+	calculate the areas of the code required.  The BCD Code is interpreted as follows:
+	BCD_EN = 0: None of the inputs are enabled (QBAD ALL).
+	BCD_EN = 1: Only IN01 is enabled; Dual Select configuration with IN02 disabled by operator or QBAD, or Triple
+	            Select configuration with IN02 and IN03 disabled by operator or QBADs.
+	BCD_EN = 2: Only IN02 enabled; Dual Select configuration with IN01 disabled by operator or QBAD, or Triple
+	            Select configuration with IN01 and IN03 disabled by operator or QBADs.
+	BCD_EN = 3: IN01 and IN02 enabled; Dual Select configuration with no QBADs, or Triple Select configuration with
+	            IN03 disabled by operator or QBAD.
+	BCD_EN = 4: Only IN03 enabled; Triple Select configuration with IN01 and IN02 disabled by operator or QBADs.
+	BCD_EN = 5: Only IN01 and IN03 are enabled; Triple Select configuration with IN02 disabled by operator or QBAD.
+	BCD_EN = 6: Only IN02 and IN03 are enabled; Triple Select configuration with IN01 disabled by operator or QBAD.
+	BCD_EN = 7: All three inputs are enabled; Triple Select configuration with no QBADs.
+	**************************************************************************************************************)
+	
+	// Set up a BCD code from the INnn_EN bits to use in this block.
+	IF #IN01_EN THEN
+	    #BCD_EN_B0 := 1;
+	ELSE
+	    #BCD_EN_B0 := 0;
+	END_IF;
+	IF #IN02_EN THEN
+	    #BCD_EN_B1 := 2;
+	ELSE
+	    #BCD_EN_B1 := 0;
+	END_IF;
+	IF #IN03_EN THEN
+	    #BCD_EN_B2 := 4;
+	ELSE
+	    #BCD_EN_B2 := 0;
+	END_IF;
+	#BCD_EN := #BCD_EN_B0 + #BCD_EN_B1 + #BCD_EN_B2;
+	
+	(**************************************************************************************************************
+	RANGE LIMITATIONS (Parts 1 to 3):
+	Part 1: Range Limit the NUM_IN between 1 and 3, since there should always be at least one and never more than
+	        three inputs selected for use.
+	Part 2: Range Limit the MODE between 0 and 3, since any modes outside of these four are not permitted.
+	Part 3: Range Limit the MODE2 between 0 and 3, since any modes outside of these four are not permitted.
+	**************************************************************************************************************)
+	
+	// Part 1: Range Limit the NUM_IN to 1, 2, or 3.
+	IF #NUM_IN < 1 THEN
+	    #NUM_IN := 1;
+	END_IF;
+	IF #NUM_IN > 3 THEN
+	    #NUM_IN := 3;
+	END_IF;
+	
+	// Part 2: Range Limit MODE between 0 and 3.
+	IF #MODE < 0 THEN
+	    #MODE := 0;
+	END_IF;
+	IF #MODE > 3 THEN
+	    #MODE := 3;
+	END_IF;
+	
+	// Part 3: Range Limit MODE2 between 0 and 3.
+	IF #MODE2 < 0 THEN
+	    #MODE2 := 0;
+	END_IF;
+	IF #MODE2 > 3 THEN
+	    #MODE2 := 3;
+	END_IF;
+	
+	(**************************************************************************************************************
+	ALARM CODE (Parts 1 and 2):
+	Part 1: Set up the "ALL INPUTS BTA" Alarm when none of the inputs are enabled.
+	Part 2: Set up the "Non-Standard Select" when the number of inputs configured does not match the number of
+	        inputs enabled.  This condition may exist when the operator deselected the input, or when the code
+	        deselected the input due to QBAD.  Send the warning only in the case where the operator deselected the
+	        input.
+	**************************************************************************************************************)
+	
+	// Part 1: Set the ERR_ALL if all inputs are in QBAD condition.
+	// Used the IN0n_EN to prevent clearing ERR_ALL until input is enabled by operator again.
+	#QERR_ALL := NOT (#IN01_EN) AND NOT (#IN02_EN) AND NOT (#IN03_EN);
+	
+	// Part 2: Set the QWARN_EN output if there is an input that is disabled.
+	// First, determine number of inputs enabled, then compare and send warning.
+	// Originally (until version 1.1) this QWARN_EN was filtered to not come true if a QBAD condition existed.
+	// However, client requests this warning to be true also on QBAD conditions.  Good code saved, client code
+	// implemented (see below).
+	IF #IN01_EN THEN
+	    #IN01_EN_I := 1;
+	ELSE
+	    #IN01_EN_I := 0;
+	END_IF;
+	IF #IN02_EN THEN
+	    #IN02_EN_I := 1;
+	ELSE
+	    #IN02_EN_I := 0;
+	END_IF;
+	IF #IN03_EN THEN
+	    #IN03_EN_I := 1;
+	ELSE
+	    #IN03_EN_I := 0;
+	END_IF;
+	#NUM_EN := #IN01_EN_I + #IN02_EN_I + #IN03_EN_I;
+	#QWARN_EN := (#NUM_IN <> #NUM_EN);
+	// Good code saved here.
+	//QWARN_EN  := ((NUM_IN <> NUM_EN) AND NOT(QERR_ALL) AND NOT(IN01_QBAD) AND NOT(IN02_QBAD) AND NOT(IN03_QBAD));
+	
+	(**************************************************************************************************************
+	INPUT ENABLE REQUEST MANAGEMENT:
+	If the number of inputs enabled NUM_EN=1 and an operator attempts to disable, do not grant the request.
+	Otherwise, fulfill the request.  This prevents the last input from being disabled.
+	**************************************************************************************************************)
+	
+	// Input Enable Request Management
+	IF NOT ((#NUM_EN = 1) AND (#IN01_EN)) THEN
+	    #IN01_EN := #IN01_REQ;
+	END_IF;
+	IF NOT ((#NUM_EN = 1) AND (#IN02_EN)) THEN
+	    #IN02_EN := #IN02_REQ;
+	END_IF;
+	IF NOT ((#NUM_EN = 1) AND (#IN03_EN)) THEN
+	    #IN03_EN := #IN03_REQ;
+	END_IF;
+	
+	// Write back the EN to the REQ bit to keep it in sync.
+	#IN01_REQ := #IN01_EN;
+	#IN02_REQ := #IN02_EN;
+	#IN03_REQ := #IN03_EN;
+	
+	(**************************************************************************************************************
+	SELECTION CALCULATIONS:
+	This is the main section of code where it is determined if a different input needs to be sent to the output.
+	**************************************************************************************************************)
+	
+	// Set up all outputs based on the BCD_EN code.
+	CASE #BCD_EN OF
+	        // If none are enabled, display none selected.
+	        // This case could be generated from all QBAD or operator tried to deselect all.
+	    0:
+	        #QSEL01 := false;
+	        #QSEL02 := false;
+	        #QSEL03 := false;
+	        
+	        // If only IN01_EN is active, set IN01 as the output.
+	        // Report which output is selected.
+	    1:
+	        #Q_LO := #IN01Temp;
+	        #Q_HI := #IN01Temp;
+	        #Q_MID := #IN01Temp;
+	        #Q_AVG := #IN01Temp;
+	        #QSEL01 := true;
+	        #QSEL02 := false;
+	        #QSEL03 := false;
+	        
+	        // If only IN02_EN is active, set IN02 as the output.
+	        // Report which output is selected.
+	    2:
+	        #Q_LO := #IN02Temp;
+	        #Q_HI := #IN02Temp;
+	        #Q_MID := #IN02Temp;
+	        #Q_AVG := #IN02Temp;
+	        #QSEL01 := false;
+	        #QSEL02 := true;
+	        #QSEL03 := false;
+	        
+	        // If IN01_EN and IN02_EN are active, compare the values for sending out.
+	        // Report which output is selected.
+	    3:
+	        // Set up MODE2 if required.
+	        IF #MODE2ACTIVE THEN
+	            #MODE_TEMP := #MODE2;
+	        ELSE
+	            #MODE_TEMP := #MODE;
+	        END_IF;
+	        // Find the lower of the two values and put in the Q_LO location.
+	        // If Deadband Switching is Enabled (default), then check to see if the
+	        // values need to be switched first.  If not, send the new input value
+	        // of the same transmitter to the output.  If so, calculate the switch.
+	        IF #DB_EN THEN                                  // Deadband switching is enabled
+	            IF NOT #DB_SW_EN12 THEN                     // No switching of inputs required
+	                IF #QSEL01 THEN                         // Keep the same input sent to output
+	                    #Q_LO := #IN01Temp;
+	                ELSE
+	                    #Q_LO := #IN02Temp;
+	                END_IF;
+	            ELSE                                        // Input switching is required
+	                IF #IN01Temp < #IN02Temp THEN            // IN01 is low
+	                    #Q_LO := #IN01Temp;
+	                    IF #MODE_TEMP = 0 THEN
+	                        #QSEL01 := true;
+	                        #QSEL02 := false;
+	                        #QSEL03 := false;
+	                    END_IF;
+	                ELSE                                    // IN02 is low
+	                    #Q_LO := #IN02Temp;
+	                    IF #MODE_TEMP = 0 THEN
+	                        #QSEL01 := false;
+	                        #QSEL02 := true;
+	                        #QSEL03 := false;
+	                    END_IF;
+	                END_IF;
+	            END_IF;
+	        ELSE                                            // DB_EN is not selected, switch regardless
+	            IF #IN01Temp < #IN02Temp THEN                // IN01 is low
+	                #Q_LO := #IN01Temp;
+	                IF #MODE_TEMP = 0 THEN
+	                    #QSEL01 := true;
+	                    #QSEL02 := false;
+	                    #QSEL03 := false;
+	                END_IF;
+	            ELSE                                        // IN02 is low
+	                #Q_LO := #IN02Temp;
+	                IF #MODE_TEMP = 0 THEN
+	                    #QSEL01 := false;
+	                    #QSEL02 := true;
+	                    #QSEL03 := false;
+	                END_IF;
+	            END_IF;
+	        END_IF;                                         // End of DB_EN
+	        // Find the higher of the two values and put in the Q_HI location.
+	        // If Deadband Switching is Enabled (default), then check to see if the
+	        // values need to be switched first.  If not, send the new input value
+	        // of the same transmitter to the output.  If so, calculate the switch.
+	        IF #DB_EN THEN                                  // Deadband switching is enabled
+	            IF NOT #DB_SW_EN12 THEN                     // No switching of inputs required
+	                IF #QSEL01 THEN                         // Keep the same input sent to output
+	                    #Q_HI := #IN01Temp;
+	                ELSE
+	                    #Q_HI := #IN02Temp;
+	                END_IF;
+	            ELSE                                        // Input switching is required
+	                IF #IN01Temp > #IN02Temp THEN            // IN01 is high
+	                    #Q_HI := #IN01Temp;
+	                    IF #MODE_TEMP = 1 THEN
+	                        #QSEL01 := true;
+	                        #QSEL02 := false;
+	                        #QSEL03 := false;
+	                    END_IF;
+	                ELSE                                    // IN02 is high
+	                    #Q_HI := #IN02Temp;
+	                    IF #MODE_TEMP = 1 THEN
+	                        #QSEL01 := false;
+	                        #QSEL02 := true;
+	                        #QSEL03 := false;
+	                    END_IF;
+	                END_IF;
+	            END_IF;
+	        ELSE                                            // DB_EN is not selected, switch regardless
+	            IF #IN01Temp > #IN02Temp THEN                // IN01 is high
+	                #Q_HI := #IN01Temp;
+	                IF #MODE_TEMP = 1 THEN
+	                    #QSEL01 := true;
+	                    #QSEL02 := false;
+	                    #QSEL03 := false;
+	                END_IF;
+	            ELSE                                        // IN02 is high
+	                #Q_HI := #IN02Temp;
+	                IF #MODE_TEMP = 1 THEN
+	                    #QSEL01 := false;
+	                    #QSEL02 := true;
+	                    #QSEL03 := false;
+	                END_IF;
+	            END_IF;
+	        END_IF;                                         // End of DB_EN
+	        // Find the MID (same as average) and put in the Q_MID and Q_AVG.
+	        #Q_MID := (#IN01Temp + #IN02Temp) / 2.0;
+	        #Q_AVG := #Q_MID;
+	        IF (#MODE_TEMP = 2) OR (#MODE_TEMP = 3) THEN
+	            #QSEL01 := true;
+	            #QSEL02 := true;
+	            #QSEL03 := false;
+	        END_IF;
+	        
+	        // If only IN03_EN is active, send out the Manual or Auto value from IN03.
+	        // Report which output is selected.
+	    4:
+	        #Q_LO := #IN03Temp;
+	        #Q_HI := #IN03Temp;
+	        #Q_MID := #IN03Temp;
+	        #Q_AVG := #IN03Temp;
+	        #QSEL01 := false;
+	        #QSEL02 := false;
+	        #QSEL03 := true;
+	        
+	        // If IN01_EN and IN03_EN are active, compare the values for sending out.
+	        // Report which output is selected.
+	    5:
+	        // Set up MODE2 if required.
+	        IF #MODE2ACTIVE THEN
+	            #MODE_TEMP := #MODE2;
+	        ELSE
+	            #MODE_TEMP := #MODE;
+	        END_IF;
+	        // Find the lower of the two values and put in the Q_LO location.
+	        // If Deadband Switching is Enabled (default), then check to see if the
+	        // values need to be switched first.  If not, send the new input value
+	        // of the same transmitter to the output.  If so, calculate the switch.
+	        IF #DB_EN THEN                                  // Deadband switching is enabled
+	            IF NOT #DB_SW_EN13 THEN                     // No switching of inputs required
+	                IF #QSEL01 THEN                         // Keep the same input sent to output
+	                    #Q_LO := #IN01Temp;
+	                ELSE
+	                    #Q_LO := #IN03Temp;
+	                END_IF;
+	            ELSE                                        // Input switching is required
+	                IF #IN01Temp < #IN03Temp THEN            // IN01 is low
+	                    #Q_LO := #IN01Temp;
+	                    IF #MODE_TEMP = 0 THEN
+	                        #QSEL01 := true;
+	                        #QSEL02 := false;
+	                        #QSEL03 := false;
+	                    END_IF;
+	                ELSE                                    // IN03 is low
+	                    #Q_LO := #IN03Temp;
+	                    IF #MODE_TEMP = 0 THEN
+	                        #QSEL01 := false;
+	                        #QSEL02 := false;
+	                        #QSEL03 := true;
+	                    END_IF;
+	                END_IF;
+	            END_IF;
+	        ELSE                                            // DB_EN is not selected, switch regardless
+	            IF #IN01Temp < #IN03Temp THEN                // IN01 is low
+	                #Q_LO := #IN01Temp;
+	                IF #MODE_TEMP = 0 THEN
+	                    #QSEL01 := true;
+	                    #QSEL02 := false;
+	                    #QSEL03 := false;
+	                END_IF;
+	            ELSE                                        // IN03 is low
+	                #Q_LO := #IN03Temp;
+	                IF #MODE_TEMP = 0 THEN
+	                    #QSEL01 := false;
+	                    #QSEL02 := false;
+	                    #QSEL03 := true;
+	                END_IF;
+	            END_IF;
+	        END_IF;                                         // End of DB_EN
+	        // Find the higher of the two values and put in the Q_HI location.
+	        // If Deadband Switching is Enabled (default), then check to see if the
+	        // values need to be switched first.  If not, send the new input value
+	        // of the same transmitter to the output.  If so, calculate the switch.
+	        IF #DB_EN THEN                                  // Deadband switching is enabled
+	            IF NOT #DB_SW_EN13 THEN                     // No switching of inputs required
+	                IF #QSEL01 THEN                         // Keep the same input sent to output
+	                    #Q_HI := #IN01Temp;
+	                ELSE
+	                    #Q_HI := #IN03Temp;
+	                END_IF;
+	            ELSE                                        // Input switching is required
+	                IF #IN01Temp > #IN03Temp THEN            // IN01 is high
+	                    #Q_HI := #IN01Temp;
+	                    IF #MODE_TEMP = 1 THEN
+	                        #QSEL01 := true;
+	                        #QSEL02 := false;
+	                        #QSEL03 := false;
+	                    END_IF;
+	                ELSE                                    // IN03 is high
+	                    #Q_HI := #IN03Temp;
+	                    IF #MODE_TEMP = 1 THEN
+	                        #QSEL01 := false;
+	                        #QSEL02 := false;
+	                        #QSEL03 := true;
+	                    END_IF;
+	                END_IF;
+	            END_IF;
+	        ELSE                                            // DB_EN is not selected, switch regardless
+	            IF #IN01Temp > #IN03Temp THEN                // IN01 is high
+	                #Q_HI := #IN01Temp;
+	                IF #MODE_TEMP = 1 THEN
+	                    #QSEL01 := true;
+	                    #QSEL02 := false;
+	                    #QSEL03 := false;
+	                END_IF;
+	            ELSE                                        // IN03 is high
+	                #Q_HI := #IN03Temp;
+	                IF #MODE_TEMP = 1 THEN
+	                    #QSEL01 := false;
+	                    #QSEL02 := false;
+	                    #QSEL03 := true;
+	                END_IF;
+	            END_IF;
+	        END_IF;                                         // End of DB_EN
+	        // Find the MID (same as average) and put in the Q_MID and Q_AVG.
+	        #Q_MID := (#IN01Temp + #IN03Temp) / 2.0;
+	        #Q_AVG := #Q_MID;
+	        IF (#MODE_TEMP = 2) OR (#MODE_TEMP = 3) THEN
+	            #QSEL01 := true;
+	            #QSEL02 := false;
+	            #QSEL03 := true;
+	        END_IF;
+	        
+	        // If IN02_EN and IN03_EN are active, compare the values for sending out.
+	        // Report which output is selected.
+	    6:
+	        // Set up MODE2 if required.
+	        IF #MODE2ACTIVE THEN
+	            #MODE_TEMP := #MODE2;
+	        ELSE
+	            #MODE_TEMP := #MODE;
+	        END_IF;
+	        // Find the lower of the two values and put in the Q_LO location.
+	        // If Deadband Switching is Enabled (default), then check to see if the
+	        // values need to be switched first.  If not, send the new input value
+	        // of the same transmitter to the output.  If so, calculate the switch.
+	        IF #DB_EN THEN                                  // Deadband switching is enabled
+	            IF NOT #DB_SW_EN23 THEN                     // No switching of inputs required
+	                IF #QSEL02 THEN                         // Keep the same input sent to output
+	                    #Q_LO := #IN02Temp;
+	                ELSE
+	                    #Q_LO := #IN03Temp;
+	                END_IF;
+	            ELSE                                        // Input switching is required
+	                IF #IN02Temp < #IN03Temp THEN            // IN02 is low
+	                    #Q_LO := #IN02Temp;
+	                    IF #MODE_TEMP = 0 THEN
+	                        #QSEL01 := false;
+	                        #QSEL02 := true;
+	                        #QSEL03 := false;
+	                    END_IF;
+	                ELSE                                    // IN03 is low
+	                    #Q_LO := #IN03Temp;
+	                    IF #MODE_TEMP = 0 THEN
+	                        #QSEL01 := false;
+	                        #QSEL02 := false;
+	                        #QSEL03 := true;
+	                    END_IF;
+	                END_IF;
+	            END_IF;
+	        ELSE                                            // DB_EN is not selected, switch regardless
+	            IF #IN02Temp < #IN03Temp THEN                // IN02 is low
+	                #Q_LO := #IN02Temp;
+	                IF #MODE_TEMP = 0 THEN
+	                    #QSEL01 := false;
+	                    #QSEL02 := true;
+	                    #QSEL03 := false;
+	                END_IF;
+	            ELSE                                        // IN03 is low
+	                #Q_LO := #IN03Temp;
+	                IF #MODE_TEMP = 0 THEN
+	                    #QSEL01 := false;
+	                    #QSEL02 := false;
+	                    #QSEL03 := true;
+	                END_IF;
+	            END_IF;
+	        END_IF;                                         // End of DB_EN
+	        // Find the higher of the two values and put in the Q_HI location.
+	        // If Deadband Switching is Enabled (default), then check to see if the
+	        // values need to be switched first.  If not, send the new input value
+	        // of the same transmitter to the output.  If so, calculate the switch.
+	        IF #DB_EN THEN                                  // Deadband switching is enabled
+	            IF NOT #DB_SW_EN23 THEN                     // No switching of inputs required
+	                IF #QSEL02 THEN                         // Keep the same input sent to output
+	                    #Q_HI := #IN02Temp;
+	                ELSE
+	                    #Q_HI := #IN03Temp;
+	                END_IF;
+	            ELSE                                        // Input switching is required
+	                IF #IN02Temp > #IN03Temp THEN            // IN02 is high
+	                    #Q_HI := #IN02Temp;
+	                    IF #MODE_TEMP = 1 THEN
+	                        #QSEL01 := false;
+	                        #QSEL02 := true;
+	                        #QSEL03 := false;
+	                    END_IF;
+	                ELSE                                    // IN03 is high
+	                    #Q_HI := #IN03Temp;
+	                    IF #MODE_TEMP = 1 THEN
+	                        #QSEL01 := false;
+	                        #QSEL02 := false;
+	                        #QSEL03 := true;
+	                    END_IF;
+	                END_IF;
+	            END_IF;
+	        ELSE                                            // DB_EN is not selected, switch regardless
+	            IF #IN02Temp > #IN03Temp THEN                // IN02 is high
+	                #Q_HI := #IN02Temp;
+	                IF #MODE_TEMP = 1 THEN
+	                    #QSEL01 := false;
+	                    #QSEL02 := true;
+	                    #QSEL03 := false;
+	                END_IF;
+	            ELSE                                        // IN03 is high
+	                #Q_HI := #IN03Temp;
+	                IF #MODE_TEMP = 1 THEN
+	                    #QSEL01 := false;
+	                    #QSEL02 := false;
+	                    #QSEL03 := true;
+	                END_IF;
+	            END_IF;
+	        END_IF;                                         // End of DB_EN
+	        // Find the MID (same as average) and put in the Q_MID and Q_AVG.
+	        #Q_MID := (#IN02Temp + #IN03Temp) / 2.0;
+	        #Q_AVG := #Q_MID;
+	        IF (#MODE_TEMP = 2) OR (#MODE_TEMP = 3) THEN
+	            #QSEL01 := false;
+	            #QSEL02 := true;
+	            #QSEL03 := true;
+	        END_IF;
+	        
+	        // If IN01_EN, IN02_EN and IN03_EN are active, compare the values for sending out.
+	        // Report which output is selected.
+	    7:
+	        // Find the lowest of the three values and put in the Q_LO location.
+	        // If Deadband Switching is Enabled (default), then check to see if the
+	        // values need to be switched first.  If not, send the new input value
+	        // of the same transmitter to the output.  If so, calculate the switch.
+	        IF #DB_EN THEN                                  // Deadband switching is enabled
+	            IF NOT #DB_SW_3LO THEN                      // No switching of inputs required
+	                IF #QSEL01 THEN                         // Keep the same input sent to output
+	                    #Q_LO := #IN01Temp;
+	                END_IF;
+	                IF #QSEL02 THEN
+	                    #Q_LO := #IN02Temp;
+	                END_IF;
+	                IF #QSEL03 THEN
+	                    #Q_LO := #IN03Temp;
+	                END_IF;
+	            ELSE                                        // Input switching is required
+	                IF #IN01Temp <= #IN02Temp THEN           // IN01 is lower than IN02
+	                    IF #IN01Temp < #IN03Temp THEN        // IN01 is lowest, IN03 lower than IN02
+	                        #Q_LO := #IN01Temp;
+	                        IF #MODE = 0 THEN
+	                            #QSEL01 := true;
+	                            #QSEL02 := false;
+	                            #QSEL03 := false;
+	                        END_IF;
+	                    ELSE                                // IN03 is lowest
+	                        #Q_LO := #IN03Temp;
+	                        IF #MODE = 0 THEN
+	                            #QSEL01 := false;
+	                            #QSEL02 := false;
+	                            #QSEL03 := true;
+	                        END_IF;
+	                    END_IF;
+	                ELSE                                    // IN01 is not lower than IN02
+	                    IF #IN02Temp <= #IN03Temp THEN       // IN02 is lowest
+	                        #Q_LO := #IN02Temp;
+	                        IF #MODE = 0 THEN
+	                            #QSEL01 := false;
+	                            #QSEL02 := true;
+	                            #QSEL03 := false;
+	                        END_IF;
+	                    ELSE                                // IN03 is lowest
+	                        #Q_LO := #IN03Temp;
+	                        IF #MODE = 0 THEN
+	                            #QSEL01 := false;
+	                            #QSEL02 := false;
+	                            #QSEL03 := true;
+	                        END_IF;
+	                    END_IF;
+	                END_IF;
+	            END_IF;
+	        ELSE                                            // DB_EN is not selected, switch regardless
+	            IF #IN01Temp <= #IN02Temp THEN               // IN01 is lower than IN02
+	                IF #IN01Temp < #IN03Temp THEN            // IN01 is lowest, IN03 lower than IN02
+	                    #Q_LO := #IN01Temp;
+	                    IF #MODE = 0 THEN
+	                        #QSEL01 := true;
+	                        #QSEL02 := false;
+	                        #QSEL03 := false;
+	                    END_IF;
+	                ELSE                                    // IN03 is lowest
+	                    #Q_LO := #IN03Temp;
+	                    IF #MODE = 0 THEN
+	                        #QSEL01 := false;
+	                        #QSEL02 := false;
+	                        #QSEL03 := true;
+	                    END_IF;
+	                END_IF;
+	            ELSE                                        // IN01 is not lower than IN02
+	                IF #IN02Temp <= #IN03Temp THEN           // IN02 is lowest
+	                    #Q_LO := #IN02Temp;
+	                    IF #MODE = 0 THEN
+	                        #QSEL01 := false;
+	                        #QSEL02 := true;
+	                        #QSEL03 := false;
+	                    END_IF;
+	                ELSE                                    // IN03 is lowest
+	                    #Q_LO := #IN03Temp;
+	                    IF #MODE = 0 THEN
+	                        #QSEL01 := false;
+	                        #QSEL02 := false;
+	                        #QSEL03 := true;
+	                    END_IF;
+	                END_IF;
+	            END_IF;
+	        END_IF;                                         // End of DB_EN
+	        
+	        // Find the highest of the three values and put in the Q_HI location.
+	        // If Deadband Switching is Enabled (default), then check to see if the
+	        // values need to be switched first.  If not, send the new input value
+	        // of the same transmitter to the output.  If so, calculate the switch.
+	        IF #DB_EN THEN                                  // Deadband switching is enabled
+	            IF NOT #DB_SW_3HI THEN                      // No switching of inputs required
+	                IF #QSEL01 THEN                         // Keep the same input sent to output
+	                    #Q_HI := #IN01Temp;
+	                END_IF;
+	                IF #QSEL02 THEN
+	                    #Q_HI := #IN02Temp;
+	                END_IF;
+	                IF #QSEL03 THEN
+	                    #Q_HI := #IN03Temp;
+	                END_IF;
+	            ELSE                                        // Input switching is required
+	                IF #IN01Temp >= #IN02Temp THEN           // IN01 is higher than IN02
+	                    IF #IN01Temp > #IN03Temp THEN        // IN01 is highest
+	                        #Q_HI := #IN01Temp;
+	                        IF #MODE = 1 THEN
+	                            #QSEL01 := true;
+	                            #QSEL02 := false;
+	                            #QSEL03 := false;
+	                        END_IF;
+	                    ELSE                                // IN03 is highest
+	                        #Q_HI := #IN03Temp;
+	                        IF #MODE = 1 THEN
+	                            #QSEL01 := false;
+	                            #QSEL02 := false;
+	                            #QSEL03 := true;
+	                        END_IF;
+	                    END_IF;
+	                ELSE                                    // IN01 is not higher than IN02
+	                    IF #IN02Temp >= #IN03Temp THEN       // IN02 is highest
+	                        #Q_HI := #IN02Temp;
+	                        IF #MODE = 1 THEN
+	                            #QSEL01 := false;
+	                            #QSEL02 := true;
+	                            #QSEL03 := false;
+	                        END_IF;
+	                    ELSE                                // IN03 is highest
+	                        #Q_HI := #IN03Temp;
+	                        IF #MODE = 1 THEN
+	                            #QSEL01 := false;
+	                            #QSEL02 := false;
+	                            #QSEL03 := true;
+	                        END_IF;
+	                    END_IF;
+	                END_IF;
+	            END_IF;
+	        ELSE                                            // DB_EN is not selected, switch regardless
+	            IF #IN01Temp >= #IN02Temp THEN               // IN01 is higher than IN02
+	                IF #IN01Temp > #IN03Temp THEN            // IN01 is highest
+	                    #Q_HI := #IN01Temp;
+	                    IF #MODE = 1 THEN
+	                        #QSEL01 := true;
+	                        #QSEL02 := false;
+	                        #QSEL03 := false;
+	                    END_IF;
+	                ELSE                                    // IN03 is highest
+	                    #Q_HI := #IN03Temp;
+	                    IF #MODE = 1 THEN
+	                        #QSEL01 := false;
+	                        #QSEL02 := false;
+	                        #QSEL03 := true;
+	                    END_IF;
+	                END_IF;
+	            ELSE                                        // IN01 is not higher than IN02
+	                IF #IN02Temp >= #IN03Temp THEN           // IN02 is highest
+	                    #Q_HI := #IN02Temp;
+	                    IF #MODE = 1 THEN
+	                        #QSEL01 := false;
+	                        #QSEL02 := true;
+	                        #QSEL03 := false;
+	                    END_IF;
+	                ELSE                                    // IN03 is highest
+	                    #Q_HI := #IN03Temp;
+	                    IF #MODE = 1 THEN
+	                        #QSEL01 := false;
+	                        #QSEL02 := false;
+	                        #QSEL03 := true;
+	                    END_IF;
+	                END_IF;
+	            END_IF;
+	        END_IF;                                         // End of DB_EN
+	        // Find the middle of the three values and put in the Q_MID location.
+	        // If Deadband Switching is Enabled (default), then check to see if the
+	        // values need to be switched first.  If not, send the new input value
+	        // of the same transmitter to the output.  If so, calculate the switch.
+	        IF #DB_EN THEN                                  // Deadband switching is enabled
+	            IF NOT #DB_SW_3MID THEN                     // No switching of inputs required
+	                IF #QSEL01 THEN                         // Keep the same input sent to output
+	                    #Q_MID := #IN01Temp;
+	                END_IF;
+	                IF #QSEL02 THEN
+	                    #Q_MID := #IN02Temp;
+	                END_IF;
+	                IF #QSEL03 THEN
+	                    #Q_MID := #IN03Temp;
+	                END_IF;
+	            ELSE                                        // Input switching is required
+	                IF #IN01Temp >= #IN02Temp THEN           // IN01 is greater than or equal to IN02, 213
+	                    IF #IN01Temp < #IN03Temp THEN        // IN01 is less than IN03, IN01 is middle
+	                        #Q_MID := #IN01Temp;
+	                        IF #MODE = 2 THEN
+	                            #QSEL01 := true;
+	                            #QSEL02 := false;
+	                            #QSEL03 := false;
+	                        END_IF;
+	                    ELSE                                // IN02 or IN03 is middle
+	                        IF #IN02Temp <= #IN03Temp THEN   // IN03 is middle
+	                            #Q_MID := #IN03Temp;
+	                            IF #MODE = 2 THEN
+	                                #QSEL01 := false;
+	                                #QSEL02 := false;
+	                                #QSEL03 := true;
+	                            END_IF;
+	                        ELSE                            // IN02 is middle
+	                            #Q_MID := #IN02Temp;
+	                            IF #MODE = 2 THEN
+	                                #QSEL01 := false;
+	                                #QSEL02 := true;
+	                                #QSEL03 := false;
+	                            END_IF;
+	                        END_IF;
+	                    END_IF;
+	                ELSE
+	                    IF #IN01Temp >= #IN03Temp THEN       // IN01 is greater than or equal to IN03
+	                        #Q_MID := #IN01Temp;              // IN01 is middle
+	                        IF #MODE = 2 THEN
+	                            #QSEL01 := true;
+	                            #QSEL02 := false;
+	                            #QSEL03 := false;
+	                        END_IF;
+	                    ELSE                                // IN01 is less than IN03
+	                        IF #IN02Temp >= #IN03Temp THEN   // IN02 is greater than or equal to IN03
+	                            #Q_MID := #IN03Temp;          // IN03 is middle
+	                            IF #MODE = 2 THEN
+	                                #QSEL01 := false;
+	                                #QSEL02 := false;
+	                                #QSEL03 := true;
+	                            END_IF;
+	                        ELSE                            // IN02 is middle
+	                            #Q_MID := #IN02Temp;
+	                            IF #MODE = 2 THEN
+	                                #QSEL01 := false;
+	                                #QSEL02 := true;
+	                                #QSEL03 := false;
+	                            END_IF;
+	                        END_IF;
+	                    END_IF;
+	                END_IF;
+	            END_IF;
+	        ELSE                                            // DB_EN is not selected, switch regardless
+	            IF #IN01Temp >= #IN02Temp THEN               // IN01 will be middle if it is less than IN03
+	                IF #IN01Temp < #IN03Temp THEN            // IN01 is middle
+	                    #Q_MID := #IN01Temp;
+	                    IF #MODE = 2 THEN
+	                        #QSEL01 := true;
+	                        #QSEL02 := false;
+	                        #QSEL03 := false;
+	                    END_IF;
+	                ELSE                                    // IN01 cannot be middle
+	                    IF #IN02Temp <= #IN03Temp THEN       // IN03 is middle
+	                        #Q_MID := #IN03Temp;
+	                        IF #MODE = 2 THEN
+	                            #QSEL01 := false;
+	                            #QSEL02 := false;
+	                            #QSEL03 := true;
+	                        END_IF;
+	                    ELSE                                // IN02 is middle
+	                        #Q_MID := #IN02Temp;
+	                        IF #MODE = 2 THEN
+	                            #QSEL01 := false;
+	                            #QSEL02 := true;
+	                            #QSEL03 := false;
+	                        END_IF;
+	                    END_IF;
+	                END_IF;
+	            ELSE
+	                IF #IN01Temp >= #IN03Temp THEN           // IN01 is middle
+	                    #Q_MID := #IN01Temp;
+	                    IF #MODE = 2 THEN
+	                        #QSEL01 := true;
+	                        #QSEL02 := false;
+	                        #QSEL03 := false;
+	                    END_IF;
+	                ELSE
+	                    IF #IN02Temp >= #IN03Temp THEN       // IN03 is middle
+	                        #Q_MID := #IN03Temp;
+	                        IF #MODE = 2 THEN
+	                            #QSEL01 := false;
+	                            #QSEL02 := false;
+	                            #QSEL03 := true;
+	                        END_IF;
+	                    ELSE                                // IN02 is middle
+	                        #Q_MID := #IN02Temp;
+	                        IF #MODE = 2 THEN
+	                            #QSEL01 := false;
+	                            #QSEL02 := true;
+	                            #QSEL03 := false;
+	                        END_IF;
+	                    END_IF;
+	                END_IF;
+	            END_IF;
+	        END_IF;                                         // End of DB_EN
+	        // Find the average of the three values and put in the Q_AVG location.
+	        #Q_AVG := (#IN01Temp + #IN02Temp + #IN03Temp) / 3.0;
+	        IF #MODE = 3 THEN
+	            #QSEL01 := true;
+	            #QSEL02 := true;
+	            #QSEL03 := true;
+	        END_IF;
+	END_CASE;
+	
+	(**************************************************************************************************************
+	FINAL OUTPUT:
+	Set the final output selection based on how the block is configured.  If MODE2ACTIVE, then use the MODE_TEMP
+	which was assigned above.  If MODE2ACTIVE and selected for MID, change the output text to AVG since it is
+	really averaged in this case.  Similar code for regular MODE.
+	**************************************************************************************************************)
+	
+	IF #MODE2ACTIVE THEN
+	    CASE #MODE_TEMP OF
+	            // Set the output based on the MODE selected (Lo, Hi, Mid, or Average)
+	            // Set the QMODE_TXT string for the OS.
+	        0:
+	            #QSEL := #Q_LO;
+	            #QMODE_TXT := 'LO';
+	        1:
+	            #QSEL := #Q_HI;
+	            #QMODE_TXT := 'HI';
+	        2:
+	            #QSEL := #Q_MID;
+	            #QMODE_TXT := 'AVG';               //MID acts as AVG, so display AVG
+	        3:
+	            #QSEL := #Q_AVG;
+	            #QMODE_TXT := 'AVG';
+	    END_CASE;
+	ELSE
+	    CASE #MODE OF
+	            // Set the output based on the MODE selected (Lo, Hi, Mid, or Average)
+	            // Set the QMODE_TXT string for the OS.
+	        0:
+	            #QSEL := #Q_LO;
+	            #QMODE_TXT := 'LO';
+	        1:
+	            #QSEL := #Q_HI;
+	            #QMODE_TXT := 'HI';
+	        2:
+	            #QSEL := #Q_MID;
+	            IF #NUM_IN = 3 THEN                 //In case of NUM_IN <> 3, display AVG
+	                #QMODE_TXT := 'MID';
+	            ELSE
+	                #QMODE_TXT := 'AVG';
+	            END_IF;
+	        3:
+	            #QSEL := #Q_AVG;
+	            #QMODE_TXT := 'AVG';
+	    END_CASE;
+	END_IF;
+	
+	(**************************************************************************************************************
+	HOLD OUTPUT (Part 1):
+	Part 1: Hold the last good output when there is a QBAD on all inputs.
+	**************************************************************************************************************)
+	
+	// Part 1: Set Hold Logic
+	IF #QHOLD THEN
+	    #QSEL := #LAST_GOOD;
+	ELSE
+	    #LAST_GOOD := #QSEL;
+	END_IF;
+	
+	(**************************************************************************************************************
+	MISMATCH SECTION (Parts 1 to 3:
+	This section checks all of the inputs against each other.  If enabled for mismatch, a warning will be sent to
+	the OS after the delay, MM_TIME (sec).  Since the INnn_EN gets cleared on QBAD, use this to see if the MM_ErrN
+	conditions should be set.
+	Part 1: Check if the values are too far apart and those two inputs are enabled.
+	Part 2: If a mismatch condition exists, start the timer, MM_TMR_RUN.  If timer is finished, MM_TMR_DONE, then
+	        set the QERR_MM condition.
+	Part 3: Set up and control the timer.
+	**************************************************************************************************************)
+	
+	// Part 1: Calculate if there is a mismatch.
+	IF #MM_EN THEN
+	    #MM_Err1 := ((ABS(#IN01 - #IN02) > #MM_SP) AND (#IN01_EN AND #IN02_EN));
+	    #MM_Err2 := ((ABS(#IN02 - #IN03) > #MM_SP) AND (#IN02_EN AND #IN03_EN));
+	    #MM_Err3 := ((ABS(#IN03 - #IN01) > #MM_SP) AND (#IN03_EN AND #IN01_EN));
+	ELSE
+	    #MM_Err1 := False;
+	    #MM_Err2 := False;
+	    #MM_Err3 := False;
+	END_IF;
+	
+	// Part 2: If a mismatch condition exists for the MM_TIME seconds, set the ERR_MM output.
+	IF (#MM_Err1 OR #MM_Err2 OR #MM_Err3) THEN
+	    #MM_TMR_RUN := true;
+	    IF #MM_TMR_DONE THEN
+	        #QERR_MM := true;
+	    END_IF;
+	ELSE
+	    #QERR_MM := false;
+	    #MM_TMR_RUN := false;
+	END_IF;
+	
+	// Part 3: Timer Code.
+	// Set up the EXECTIME to work properly.
+	// Translate the MM_DLY input (seconds) into the Preset for Timer (msec)
+	#EXECTIME := #SAMPLE_T;
+	#MM_TMR_PSET := INT_TO_REAL(#MM_DLY);
+	IF NOT (#MM_TMR_RUN) THEN
+	    #MM_TMR_CURR := 0;
+	    #MM_TMR_DONE := FALSE;
+	ELSE
+	    IF (#MM_TMR_CURR <= #MM_TMR_PSET) THEN
+	        #MM_TMR_CURR := #MM_TMR_CURR + #EXECTIME;
+	    ELSE
+	        #MM_TMR_DONE := (#MM_TMR_CURR >= #MM_TMR_PSET);
+	    END_IF;
+	END_IF;
+	
+	(**************************************************************************************************************
+	AUTOMATIC RECOVERY ON RETURN FROM QBAD (Parts 3 & 4):
+	This section sets up the conditions for the Automatic Recovery of a QBAD that has come back good again.
+	Part 3: If the Input is good, (NOT INnn_QBAD) and it had been in a QBAD condition previously, FLGnn_QBAD, then
+	        start the QBAD recovery timer for this input, ARnn_STRT.  Once the timer has completed, set the ARnn_EN
+	        bit true which tells the other part of the code to enable the input again.
+	Part 4: Set up and control timers (one per input) for the Auto Recovery.
+	**************************************************************************************************************)
+	
+	// Check for Conditions where AutoRecovery needs to be used.
+	IF #AR_EN THEN
+	    IF (NOT (#IN01_QBAD) AND #FLG01_QBAD) THEN
+	        #AR01_STRT := TRUE;                          // This needs to be held true until timer is done.
+	        IF #AR01_TMRDN THEN
+	            #AR01_EN := TRUE;                        // IN01 Enable by Code (AutoRecovery). Clear where used.
+	        END_IF;
+	    ELSE
+	        #AR01_STRT := FALSE;
+	        #AR01_EN := FALSE;                           // Keep false here too so it will not auto enable.
+	    END_IF;
+	    
+	    IF (NOT (#IN02_QBAD) AND #FLG02_QBAD AND (#NUM_IN > 1)) THEN
+	        #AR02_STRT := TRUE;                          // This needs to be held true until timer is done.
+	        IF #AR02_TMRDN THEN
+	            #AR02_EN := TRUE;                        // IN02 Enable by Code (AutoRecovery). Clear where used.
+	        END_IF;
+	    ELSE
+	        #AR02_STRT := FALSE;
+	        #AR02_EN := FALSE;                           // Keep false here too so it will not auto enable.
+	    END_IF;
+	    
+	    IF (NOT (#IN03_QBAD) AND #FLG03_QBAD AND (#NUM_IN > 2)) THEN
+	        #AR03_STRT := TRUE;                          // This needs to be held true until timer is done.
+	        IF #AR03_TMRDN THEN
+	            #AR03_EN := TRUE;                        // IN03 Enable by Code (AutoRecovery). Clear where used.
+	        END_IF;
+	    ELSE
+	        #AR03_STRT := FALSE;
+	        #AR03_EN := FALSE;                           // Keep false here too so it will not auto enable.
+	    END_IF;
+	ELSE                                                // If Auto Recovery is not enabled, prevent or stop timers.
+	    #AR01_STRT := FALSE;
+	    #AR02_STRT := FALSE;
+	    #AR03_STRT := FALSE;
+	END_IF;
+	
+	
+	// Timer Code for AutoRecovery Timer 01.
+	// Note: Exectime has already been configured and used above with MM Timer.
+	// Note: AR_TMR_PSET needs to only be set here once; used for all three timers.
+	#AR_TMR_PSET := #AR_DLY;
+	IF NOT (#AR01_STRT) THEN
+	    #AR01_TMRC := 0;
+	    #AR01_TMRDN := FALSE;
+	ELSE
+	    IF (#AR01_TMRC <= #AR_TMR_PSET) THEN
+	        #AR01_TMRC := #AR01_TMRC + #EXECTIME;
+	    ELSE
+	        #AR01_TMRDN := (#AR01_TMRC >= #AR_TMR_PSET);
+	    END_IF;
+	END_IF;
+	
+	// Timer Code for AutoRecovery Timer 02.
+	IF NOT (#AR02_STRT) THEN
+	    #AR02_TMRC := 0;
+	    #AR02_TMRDN := FALSE;
+	ELSE
+	    IF (#AR02_TMRC <= #AR_TMR_PSET) THEN
+	        #AR02_TMRC := #AR02_TMRC + #EXECTIME;
+	    ELSE
+	        #AR02_TMRDN := (#AR02_TMRC >= #AR_TMR_PSET);
+	    END_IF;
+	END_IF;
+	
+	// Timer Code for AutoRecovery Timer 03.
+	IF NOT (#AR03_STRT) THEN
+	    #AR03_TMRC := 0;
+	    #AR03_TMRDN := FALSE;
+	ELSE
+	    IF (#AR03_TMRC <= #AR_TMR_PSET) THEN
+	        #AR03_TMRC := #AR03_TMRC + #EXECTIME;
+	    ELSE
+	        #AR03_TMRDN := (#AR03_TMRC >= #AR_TMR_PSET);
+	    END_IF;
+	END_IF;
+	
+	(**************************************************************************************************************
+	HOLD OUTPUT (Part 2):
+	Part 2: Only condition to hold last good output is when all inputs are in QBAD condition (or all disabled).
+	**************************************************************************************************************)
+	
+	// Part 2: Hold Condition:  If all inputs are in QBAD, hold last value.
+	#QHOLD := #QERR_ALL;
+	
+	(**************************************************************************************************************)
+	//ALARMING SECTION:
+	IF #QERR_ALL THEN
+	    
+	    #Q_ANI := 1;
+	    
+	ELSIF (#QWARN_EN OR #QERR_MM) AND NOT #QERR_ALL THEN
+	    
+	    #Q_ANI := 2;
+	    
+	ELSE
+	    
+	    #Q_ANI := 0;
+	    
+	END_IF;
+	
+	//***************************M Internal SCADA from External  ***************************\\  
+	//***************************SCADA***************************\\ 
+	//IN01_REQ
+	IF (#L_IN01_REQ <> #SCADA_DB.IN01_REQ) THEN
+	    #IN01_REQ := #SCADA_DB.IN01_REQ;
+	    #L_IN01_REQ := #IN01_REQ;
+	ELSE
+	    #SCADA_DB.IN01_REQ := #IN01_REQ;
+	END_IF;
+	//*****************************************
+	//IN02_REQ
+	IF (#L_IN02_REQ <> #SCADA_DB.IN02_REQ) THEN
+	    #IN02_REQ := #SCADA_DB.IN02_REQ;
+	    #L_IN02_REQ := #IN02_REQ;
+	ELSE
+	    #SCADA_DB.IN02_REQ := #IN02_REQ;
+	END_IF;
+	//*****************************************
+	//IN03_REQ
+	IF (#L_IN03_REQ <> #SCADA_DB.IN03_REQ) THEN
+	    #IN03_REQ := #SCADA_DB.IN03_REQ;
+	    #L_IN03_REQ := #IN03_REQ;
+	ELSE
+	    #SCADA_DB.IN03_REQ := #IN03_REQ;
+	END_IF;
+	//*****************************************
+	//Mode
+	(*IF (L_MODE <> SCADA.MODE) THEN
+	   MODE   := SCADA.MODE;
+	   L_MODE := MODE;
+	ELSE
+	   SCADA.MODE := MODE;
+	END_IF;*)
+	//*****************************************
+	
+	#SCADA_DB.IN01 := #IN01;
+	#SCADA_DB.IN02 := #IN02;
+	#SCADA_DB.IN03 := #IN03;
+	//SCADA.MODE := MODE ;
+	#SCADA_DB.NUM_IN := #NUM_IN;
+	#SCADA_DB.QBAD01 := #QBAD01;
+	#SCADA_DB.QBAD02 := #QBAD02;
+	#SCADA_DB.QBAD03 := #QBAD03;
+	#SCADA_DB.QERR_ALL := #QERR_ALL;
+	#SCADA_DB.QERR_MM := #QERR_MM;
+	#SCADA_DB.QMODE_TXT := #QMODE_TXT;
+	#SCADA_DB.QSEL := #QSEL;
+	#SCADA_DB.QWARN_EN := #QWARN_EN;
+	
+	//SCADA.AR_EN := AR_EN ;
+	//SCADA.IN01_EN := IN01_EN ;
+	//SCADA.IN02_EN := IN02_EN ;
+	//SCADA.IN03_EN := IN03_EN ;
+	#SCADA_DB.QSEL01 := #QSEL01;
+	#SCADA_DB.QSEL02 := #QSEL02;
+	#SCADA_DB.QSEL03 := #QSEL03;
+	//***************************M External SCADA from internal***************************\\ 
+	
+	
+END_FUNCTION_BLOCK
+
